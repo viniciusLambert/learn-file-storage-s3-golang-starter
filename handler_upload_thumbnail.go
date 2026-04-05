@@ -1,12 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -58,8 +55,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	fileExtension := strings.Split(mediaType, "/")[1]
-	filePath := fmt.Sprintf("%s.%s", filepath.Join(cfg.filepathRoot, "assets", videoID.String()), fileExtension)
+	assetPath := getAssetPath(videoID, mediaType)
+	filePath := cfg.getAssetDiskPath(assetPath)
 
 	newFile, err := os.Create(filePath)
 	if err != nil {
@@ -76,7 +73,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	//
 	// dataBase64 := base64.StdEncoding.EncodeToString(data)
 	// url := fmt.Sprintf("data:%s;base64,%s", mediaType, dataBase64)
-	url := fmt.Sprintf("http://localhost:%s/assets/%s.%s", cfg.port, videoID, fileExtension)
+	url := cfg.getAssetURL(assetPath)
 	video.ThumbnailURL = &url
 
 	err = cfg.db.UpdateVideo(video)
