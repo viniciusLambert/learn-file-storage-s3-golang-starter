@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"io"
 	"mime"
 	"net/http"
@@ -35,7 +37,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "unable to parse from file", err)
+		respondWithError(w, http.StatusBadRequest, "unable to extract form file", err)
 		return
 	}
 	defer file.Close()
@@ -60,7 +62,15 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	assetPath := getAssetPath(videoID, mediaType)
+	randomID := make([]byte, 32)
+	_, err = rand.Read(randomID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed creating random name", err)
+		return
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(randomID)
+
+	assetPath := getAssetPath(encoded, mediaType)
 	filePath := cfg.getAssetDiskPath(assetPath)
 
 	newFile, err := os.Create(filePath)
