@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -25,25 +27,9 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	token, err := auth.GetBearerToken(r.Header)
+	video, err := cfg.authenticateAndGetVideo(r, videoID)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
-		return
-	}
-
-	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
-	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
-		return
-	}
-
-	video, err := cfg.db.GetVideo(videoID)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error getting video from database", err)
-		return
-	}
-	if video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Not authorized to update this video", nil)
+		respondWithError(w, http.StatusUnauthorized, "error authenticating", err)
 		return
 	}
 
@@ -64,17 +50,9 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tempVideo, err := os.CreateTemp("", "tubely-upload.mp4")
+	tempVideo, err := saveUploadToTempFile(file)
 	if err != nil {
-		respondWithError(w, 500, "error creating temporary video", err)
-		return
-	}
-	defer os.Remove(tempVideo.Name())
-	defer tempVideo.Close()
-
-	_, err = io.Copy(tempVideo, file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error copyng video to temporary file", err)
+		respondWithError(w, http.StatusInternalServerError, "failed saving upload to temp File", err)
 		return
 	}
 
@@ -84,17 +62,90 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	randomID := make([]byte, 32)
-	_, err = rand.Read(randomID)
+	key, err := buildS3Key(tempVideo.Name(), mediaType)
+
+	processedVideoPath, err := processVideoForFastStart(tempVideo.Name())
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed creating random name", err)
+		respondWithError(w, http.StatusInternalServerError, "error proccessing video for fast start", err)
 		return
+	}
+	defer os.Remove(processedVideoPath)
+
+	processedVideo, err := os.Open(processedVideoPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error reading processed file", err)
+		return
+	}
+	defer processedVideo.Close()
+
+	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
+		Bucket:      aws.String(cfg.s3Bucket),
+		Key:         aws.String(key),
+		Body:        processedVideo,
+		ContentType: aws.String(mediaType),
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error putting s3 object", err)
+		return
+	}
+
+	url := cfg.getS3VideoUrl(cfg.s3Bucket, cfg.s3Region, key)
+	video.VideoURL = &url
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error uploading video to database", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, video)
+}
+
+func (cfg *apiConfig) authenticateAndGetVideo(r *http.Request, videoID uuid.UUID) (database.Video, error) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		return database.Video{}, fmt.Errorf("unauthorized: %w", err)
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		return database.Video{}, fmt.Errorf("invalid token: %w", err)
+	}
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		return database.Video{}, fmt.Errorf("video not found: %w", err)
+	}
+	if video.UserID != userID {
+		return database.Video{}, fmt.Errorf("not authorized")
+	}
+	return video, nil
+}
+
+func saveUploadToTempFile(file io.Reader) (*os.File, error) {
+	tempFile, err := os.CreateTemp("", "tubely-upload.mp4")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(tempFile, file); err != nil {
+		os.Remove(tempFile.Name())
+		return nil, err
+	}
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		os.Remove(tempFile.Name())
+		return nil, err
+	}
+	return tempFile, nil
+}
+
+func buildS3Key(tempFilePath, mediaType string) (string, error) {
+	randomID := make([]byte, 32)
+	_, err := rand.Read(randomID)
+	if err != nil {
+		return "", err
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(randomID)
 
-	videoAspectRate, err := getVideoAspectRatio(tempVideo.Name())
+	videoAspectRate, err := getVideoAspectRatio(tempFilePath)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error stracting video rate", err)
+		return "", err
 	}
 	if videoAspectRate == "16:9" {
 		encoded = "landscape/" + encoded
@@ -105,21 +156,5 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	assetPath := getAssetPath(encoded, mediaType)
-
-	cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
-		Bucket:      aws.String(cfg.s3Bucket),
-		Key:         aws.String(assetPath),
-		Body:        tempVideo,
-		ContentType: aws.String(mediaType),
-	})
-
-	url := cfg.getS3VideoUrl(cfg.s3Bucket, cfg.s3Region, assetPath)
-	video.VideoURL = &url
-	err = cfg.db.UpdateVideo(video)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error uploading video to database", err)
-		return
-	}
-
-	respondWithJSON(w, http.StatusOK, video)
+	return assetPath, nil
 }
