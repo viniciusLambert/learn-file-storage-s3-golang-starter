@@ -92,7 +92,20 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(randomID)
 
+	videoAspectRate, err := getVideoAspectRatio(tempVideo.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error stracting video rate", err)
+	}
+	if videoAspectRate == "16:9" {
+		encoded = "landscape/" + encoded
+	} else if videoAspectRate == "9:16" {
+		encoded = "portrait/" + encoded
+	} else {
+		encoded = "other/" + encoded
+	}
+
 	assetPath := getAssetPath(encoded, mediaType)
+
 	cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(assetPath),
