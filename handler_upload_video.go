@@ -89,17 +89,11 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// url := cfg.getS3VideoUrl(cfg.s3Bucket, cfg.s3Region, key)
-	url := cfg.s3Bucket + "," + key
+	url := cfg.getS3CDNVideoURL(cfg.s3CfDistribution, key)
 	video.VideoURL = &url
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "error uploading video to database", err)
-		return
-	}
-	video, err = cfg.dbVideoToSignedVideo(video)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "failed formating db video to signed video", err)
 		return
 	}
 
